@@ -34,7 +34,7 @@ tmp_path = None
 restart_run = False
 # If save_int_forcing, and intermediate file is generated to speed up
 # other simulations that use the same forcing
-save_int_forcing = True
+save_int_forcing = False
 # If restart_forcing, the forcing will be read from the intermediate files of
 # a previous run
 restart_forcing = False
