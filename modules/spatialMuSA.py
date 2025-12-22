@@ -207,6 +207,7 @@ def get_topo_arr():
         print('Unable to calculate Sx parameter, assuming flat terrain')
         winstral_sx = np.zeros_like(dem_arr)
 
+    breakpoint()
     topo_dic = {
         'Ys': Y,
         'Xs': X,

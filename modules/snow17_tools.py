@@ -56,22 +56,29 @@ def prepare_forz(forcing_sbst):  # time, prec, tair, p_atm, lat
     pxtemp = forcing_sbst['pxtemp'].values
     pxtemp1 = forcing_sbst['pxtemp1'].values
     pxtemp2 = forcing_sbst['pxtemp2'].values
+    rcld = forcing_sbst['rcld'].values
+    rmlt = forcing_sbst['rmlt'].values
+    rhof = forcing_sbst['rhof'].values
+    trho = forcing_sbst['trho'].values
 
     return time_jday, prec*cfg.dt, Temp-cnt.KELVING_CONVER, p_atm*0.01, lat, \
-        uadj, mbase, mfmax, mfmin, tipm, nmf, plwhc, pxtemp, pxtemp1, pxtemp2
+        uadj, mbase, mfmax, mfmin, tipm, nmf, plwhc, pxtemp, pxtemp1, pxtemp2,\
+        rcld, rmlt, rhof, trho
 
 
 def model_run(forcing_sbst, init=None):
 
     time_jday, prec, tair, p_atm, lat, uadj, mbase, mfmax, mfmin, tipm,\
-        nmf, plwhc, pxtemp, pxtemp1, pxtemp2 = prepare_forz(forcing_sbst)
+        nmf, plwhc, pxtemp, pxtemp1, pxtemp2, rcld, rmlt, rhof, trho =\
+        prepare_forz(forcing_sbst)
 
     if init is None:
-        init = np.zeros(5)
+        init = np.zeros(7)
 
     SWE, snd, outflow, init = snow17(time_jday, prec, tair, p_atm, lat, init,
                                      uadj, mbase, mfmax, mfmin, tipm, nmf,
-                                     plwhc, pxtemp, pxtemp1, pxtemp2)
+                                     plwhc, pxtemp, pxtemp1, pxtemp2,
+                                     rcld, rmlt, rhof, trho)
 
     Results = pd.DataFrame({'SWE': SWE,
                             'snd': snd,
@@ -359,6 +366,34 @@ def forcing_table(lat_idx, lon_idx, step=0):
         except KeyError:
             pxtemp2 = np.repeat(cnt.pxtemp2, len(prec))
 
+        try:
+            rcld = ifn.nc_array_forcing(nc_forcing_path, lat_idx, lon_idx,
+                                        param_var_names["rcld_var_name"],
+                                        date_ini, date_end)
+        except KeyError:
+            rcld = np.repeat(cnt.rcld, len(prec))
+
+        try:
+            rmlt = ifn.nc_array_forcing(nc_forcing_path, lat_idx, lon_idx,
+                                        param_var_names["rmlt_var_name"],
+                                        date_ini, date_end)
+        except KeyError:
+            rmlt = np.repeat(cnt.rmlt, len(prec))
+
+        try:
+            rhof = ifn.nc_array_forcing(nc_forcing_path, lat_idx, lon_idx,
+                                        param_var_names["rhof_var_name"],
+                                        date_ini, date_end)
+        except KeyError:
+            rhof = np.repeat(cnt.rhof, len(prec))
+
+        try:
+            trho = ifn.nc_array_forcing(nc_forcing_path, lat_idx, lon_idx,
+                                        param_var_names["trho_var_name"],
+                                        date_ini, date_end)
+        except KeyError:
+            trho = np.repeat(cnt.trho, len(prec))
+
         date_ini = dt.datetime.strptime(date_ini, "%Y-%m-%d %H:%M")
         date_end = dt.datetime.strptime(date_end, "%Y-%m-%d %H:%M")
         del_t = ifn.generate_dates(date_ini, date_end)
@@ -380,7 +415,11 @@ def forcing_table(lat_idx, lon_idx, step=0):
                                    "plwhc": plwhc,
                                    "pxtemp": pxtemp,
                                    "pxtemp1": pxtemp1,
-                                   "pxtemp2": pxtemp2})
+                                   "pxtemp2": pxtemp2,
+                                   "rcld": rcld,
+                                   "rmlt": rmlt,
+                                   "rhof": rhof,
+                                   "trho": trho})
 
         forcing_df["year"] = forcing_df["year"].dt.year
         forcing_df["month"] = forcing_df["month"].dt.month
