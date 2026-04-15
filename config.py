@@ -12,18 +12,26 @@ dt = 3600  # timestep in seconds
 # -----------------------------------
 # Directories
 # -----------------------------------
-
-nc_obs_path = "./DATA/Obs/"
-nc_forcing_path = "./DATA/Forcing/"
-nc_maks_path = "./DATA/mask/mask.nc"
-dem_path = "./DATA/DEM/DEM.nc"
+datapath = "/global/scratch/users/marcomaz"
+ 
+nc_obs_path = datapath + "/DATA_GP5400_400/Obs23/"
+nc_forcing_path = datapath + "/DATA_GP5400_400/Forcing23/"
+nc_maks_path = datapath + "/DATA_GP5400_400/mask/mask.nc" #mask_wIC2.nc"
+dem_path = None #datapath + "/DATA10/DEM/dem2.nc"
 fsm_src_path = "./FSM2/"
-intermediate_path = "./DATA/INTERMEDIATE/"
-save_ensemble_path = "./DATA/ENSEMBLES/"
-output_path = "./DATA/RESULTS/"
-spatial_propagation_storage_path = "./DATA/SPATIAL_PROP/"
-real_time_restart_path = "./DATA/REAL_TIME_RESTART/"
-tmp_path = None
+intermediate_path = datapath + "/DATA_GP5400_400/INT23_100/"
+save_ensemble_path = datapath + "/DATA_GP5400_400/ENS23_100/"
+output_path = datapath + "/DATA_GP5400_400/RES23_100/"
+spatial_propagation_storage_path = datapath + "/DATA_GP5400_400/SPATIAL_PROP23_100/"
+real_time_restart_path = datapath + "/DATA_GP5400_400/REAL_TIME_RESTART23_100/"
+tmp_path = datapath + "/DATA_GP5400_400/tmp/"
+
+# -----------------------------------
+# Spatial_covariances
+# -----------------------------------
+covariances = datapath+ "/DATA_GP5400_400/Corr23/Corr.npy"
+orderows = datapath+ "/DATA_GP5400_400/Corr23/Orderow.npy"
+prop_mask = datapath+ "/DATA_GP5400_400/Corr23/DistMask.npy"
 
 # -----------------------------------
 # Restart options
@@ -31,7 +39,7 @@ tmp_path = None
 
 # If restart_run is enabled, the outputs will not be overwritten. MuSA will
 # try to restart the simulation from the incomplete outputs
-restart_run = False
+restart_run = True
 # If save_int_forcing, and intermediate file is generated to speed up
 # other simulations that use the same forcing
 save_int_forcing = True
@@ -56,9 +64,9 @@ real_time_restart = False
 load_prev_run = False
 # da_algorithm from PF, EnKF, IEnKF, PBS, ES, IES, deterministic_OL,
 # IES-MCMC_AI, IES-MCMC, AdaMuPBS, AdaPBS or PIES
-da_algorithm = 'PBS'
+da_algorithm = 'ES'
 redraw_prior = False  # PF and PBS only
-max_iterations = 4  # IEnKF, IES, IES-MCMC and AdaPBS
+max_iterations = 3  # IEnKF, IES, IES-MCMC and AdaPBS
 # resampling_algorithm from "bootstrapping", residual_resample,
 # stratified_resample,  systematic_resample, no_resampling
 resampling_algorithm = "no_resampling"
@@ -75,7 +83,7 @@ burn_in = 0.1      # discard the first x proportion of samples
 # and time. If this option is selected, the errors will be stored in a new
 # variable in the observation files, and will have the same dimensions as
 # the observations.
-r_cov = [0.04]
+r_cov = [0.5]
 add_dynamic_noise = False
 # var_to_assim from "snd", "SWE", "Tsrf","fSCA", "SCA", "alb", "LE", "H"
 var_to_assim = ["snd"]
@@ -100,14 +108,14 @@ perturbation_strategy = ["logitnormal_adi", "logitnormal_mult"]
 precipitation_phase = "Harder"
 
 # Save ensembles as a pkl object
-save_ensemble = False
+save_ensemble = True
 
 # -----------------------------------
 # Domain
 # -----------------------------------
 
 # implementation from "point_scale", "distributed" or "Spatial_propagation"
-implementation = "distributed"
+implementation = "Spatial_propagation"
 
 # if implementation = "Spatial_propagation" : specify which observation
 # variables are spatially propagated in a list
@@ -116,12 +124,12 @@ implementation = "distributed"
 var_to_prop = var_to_assim
 
 # parallelization from "sequential", "multiprocessing" or "HPC.array"
-parallelization = "multiprocessing"
+parallelization =  "HPC.array"#"HPC.array"
 MPI = False
 # Note: if nprocess = None, the number of processors will be
 # estimated (max(n)-1). In HPC.array nprocess is an argument
 # (see e.g. run_slurm.sh), and this variable is ignored
-nprocess = 8
+nprocess = 50
 
 # number of cells to be solved per processor at each iteration
 cells_per_process = None  # None is 1
@@ -131,10 +139,11 @@ timeout = None  # None is inf
 aws_lat = 4735225.54  # Latitude in case of point_scale
 aws_lon = 710701.28   # Longitude in case of point_scale
 
-date_ini = "2018-09-01 00:00"
-date_end = "2020-08-30 23:00"
+date_ini = "2022-10-01 00:00"
+date_end = "2023-09-30 23:00"
 
-season_ini_month = 9  # In smoothers, beginning of DA window (month)
+
+season_ini_month = 10  # In smoothers, beginning of DA window (month)
 season_ini_day = 1    # In smoothers, beginning of DA window (day)
 
 # -----------------------------------
@@ -161,7 +170,7 @@ dim_num = 3  # Number of dimensions if dimension_reduction
 jitter = 1e-6
 # try to find closePD or raise exception (closePDmethod = None). This can
 # be very slow and memory consuming.
-closePDmethod = None  # 'clipped' (the faster but less accurate) or 'nearest'
+closePDmethod = 'nearest'  # 'clipped' (the faster but less accurate) or 'nearest'
 
 # Topographical dimensions to compute the distances
 topographic_features = {'Ys': True,     # Latitude
@@ -204,29 +213,12 @@ nc_dem_varname = "DEM"     # Name of the elevation variable in the DEM
 # dates_obs = '/path/to/file/dates.csv'
 
 
-dates_obs = ["2019-02-21 12:00",
-             "2019-03-26 12:00",
-             "2019-05-05 12:00",
-             "2019-05-09 12:00",
-             "2019-05-23 12:00",
-             "2019-05-30 12:00",
-             "2020-01-14 12:00",
-             "2020-02-03 12:00",
-             "2020-02-24 12:00",
-             "2020-03-11 12:00",
-             "2020-04-29 12:00",
-             "2020-05-03 12:00",
-             "2020-05-12 12:00",
-             "2020-05-19 12:00",
-             "2020-05-26 12:00",
-             "2020-06-02 12:00",
-             "2020-06-10 12:00",
-             "2020-06-21 12:00"]
+dates_obs = ["2023-04-01 00:00"]
 
-obs_var_names = ["HS"]
+obs_var_names = ["snow_depth"]
 obs_error_var_names = ['sdError']  # In case of r_cov = 'dynamic_error'
-lat_obs_var_name = "northing"
-lon_obs_var_name = "easting"
+lat_obs_var_name = "y"
+lon_obs_var_name = "x"
 
 
 # -----------------------------------
@@ -241,16 +233,17 @@ lon_obs_var_name = "easting"
 # Press_var_name can be "Press_var_name": "from_DEM". With this option, a
 # stationary pressure value is estimated from the DEM (if provided)
 # assuming standard atmosphere.
+
 frocing_var_names = {"SW_var_name": "SW",
                      "LW_var_name": "LW",
-                     "Precip_var_name": "PRECC",
-                     "Press_var_name": "PRESS",
+                     "Precip_var_name": "tp",
+                     "Press_var_name": "p",
                      "RH_var_name": "RH",
-                     "Temp_var_name": "TEMP",
-                     "Wind_var_name": "UA"}
+                     "Temp_var_name": "t",
+                     "Wind_var_name": "ws"}
 
-forcing_dim_names = {"lat_forz_var_name": "northing",
-                     "lon_forz_var_name": "easting",
+forcing_dim_names = {"lat_forz_var_name": "y",
+                     "lon_forz_var_name": "x",
                      "time_forz_var_name": "time"}
 
 param_var_names = {"RealLat_var_name": " XLAT",
