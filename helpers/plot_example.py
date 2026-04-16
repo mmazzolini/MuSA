@@ -3,7 +3,7 @@
 """
 A simple example of how to display the results of a cell
 
-@author: Esteban Alonso González - alonsoe@cesbio.cnes.fr
+@author: Esteban Alonso González - alonsoe@ipe.csic.es
 """
 import numpy as np
 import modules.internal_fns as ifn
@@ -18,10 +18,10 @@ def main(name):
 
     obs = output['DA_Results']
     ol = output['OL_Sim']
-    sd = output['sd_Sim']
-    updated = output['updated_Sim']
-    prior_mean = output['prior_mean']
-    prior_sd = output['prior_sd']
+    sd = output['std_Post']
+    updated = output['mean_Post']
+    prior_mean = output['mean_Prior']
+    prior_sd = output['std_Prior']
     try:
         sdmcmc = output['mcmcSD_Sim']
         updatedmcmc = output['mcmc_Sim']

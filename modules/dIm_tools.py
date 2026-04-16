@@ -32,26 +32,11 @@ else:
 def prepare_forz(forcing_sbst):
 
     Temp = forcing_sbst['Ta'].values
-    if cfg.precipitation_phase == "Harder":
-        _, Sf = met.pp_psychrometric(forcing_sbst["Ta"].values,
-                                     forcing_sbst["RH"].values,
-                                     forcing_sbst["Prec"].values)
 
-    elif cfg.precipitation_phase == "temp_thld":
+    _, Sf = met.linear_liston(forcing_sbst["Ta"].values,
+                              forcing_sbst["Prec"].values)
 
-        _, Sf = met.pp_temp_thld_log(forcing_sbst["Ta"].values,
-                                     forcing_sbst["Prec"].values)
-
-    elif cfg.precipitation_phase == "Liston":
-
-        _, Sf = met.linear_liston(forcing_sbst["Ta"].values,
-                                  forcing_sbst["Prec"].values)
-
-    else:
-
-        raise Exception("Precipitation phase partitioning not implemented")
-
-    return Temp-cnt.KELVING_CONVER, Sf*3600, forcing_sbst["DMF"].values
+    return Temp-cnt.KELVING_CONVER, Sf*cfg.dt, forcing_sbst["DMF"].values
 
 
 @nb.njit(fastmath=True, cache=True)
@@ -145,11 +130,6 @@ def stable_forcing(forcing_df):
     # Negative wind to 0
     temp_forz_def["Ua"].values[temp_forz_def["Ua"].values < 0] = 0
 
-    # Not to allow HR values out of 1-100%
-    temp_forz_def["RH"].values[temp_forz_def["RH"].values > 100] = 100
-    # 1% of RH is actually almost impossible, increase?
-    temp_forz_def["RH"].values[temp_forz_def["RH"].values < 0] = 1
-
     return temp_forz_def
 
 
@@ -176,8 +156,8 @@ def storeDA(Result_df, step_results, observations_sbst, error_sbst,
     var_to_assim = cfg.var_to_assim
     error_names = cfg.obs_error_var_names
 
-    rowIndex = Result_df.index[time_dict["Assimilaiton_steps"][step]:
-                               time_dict["Assimilaiton_steps"][step + 1]]
+    rowIndex = Result_df.index[time_dict["Assimilation_steps"][step]:
+                               time_dict["Assimilation_steps"][step + 1]]
 
     if len(var_to_assim) > 1:
         for i, var in enumerate(var_to_assim):
@@ -205,16 +185,16 @@ def storeOL(OL_FSM, Ensemble, observations_sbst, time_dict, step):
         OL_FSM[name_col] = ol_data.iloc[:, [n]].to_numpy()
 
 
-def store_sim(updated_Sim, sd_Sim, Ensemble,
-              time_dict, step, MCMC=False, save_prior=False):
+def store_sim(sim_stat, Ensemble, time_dict,
+              step, MCMC=False, save_prior=False):
 
     if MCMC:
         list_state = copy.deepcopy(Ensemble.state_members_mcmc)
     else:
         list_state = copy.deepcopy(Ensemble.state_membres)
 
-    rowIndex = updated_Sim.index[time_dict["Assimilaiton_steps"][step]:
-                                 time_dict["Assimilaiton_steps"][step + 1]]
+    rowIndex = sim_stat['mean'].index[time_dict["Assimilation_steps"][step]:
+                                      time_dict["Assimilation_steps"][step + 1]]
 
     # Get updated columns
     if save_prior:
@@ -223,20 +203,30 @@ def store_sim(updated_Sim, sd_Sim, Ensemble,
         pesos = Ensemble.wgth
 
     for n, name_col in enumerate(list(list_state[0].columns)):
+
         # create matrix of colums
         col_arr = [list_state[x].iloc[:, n].to_numpy()
                    for x in range(len(list_state))]
         col_arr = np.vstack(col_arr)
 
         d1 = DescrStatsW(col_arr, weights=pesos)
-        average_sim = d1.mean
-        sd_sim = d1.std
 
-        updated_Sim.loc[rowIndex, name_col] = average_sim
-        sd_Sim.loc[rowIndex, name_col] = sd_sim
+        if len(sim_stat.keys()) == 2:  # Mean, Std
+            sim_stat['mean'].loc[rowIndex, name_col] = d1.mean
+            sim_stat['std'].loc[rowIndex, name_col] = d1.std
+        else:
+            perc = d1.quantile([0, 0.25, 0.5, 0.75, 1]).values
+            sim_stat['min'].loc[rowIndex, name_col] = perc[0, :]
+            sim_stat['Q1'].loc[rowIndex, name_col] = perc[1, :]
+            sim_stat['median'].loc[rowIndex, name_col] = perc[2, :]
+            sim_stat['Q3'].loc[rowIndex, name_col] = perc[3, :]
+            sim_stat['max'].loc[rowIndex, name_col] = perc[4, :]
+            sim_stat['mean'].loc[rowIndex, name_col] = d1.mean
+            sim_stat['std'].loc[rowIndex, name_col] = d1.std
+    return sim_stat
 
 
-def init_result(del_t, DA=False):
+def init_result(del_t, DA=False, OL=False):
 
     if DA:
         # Concatenate
@@ -250,20 +240,34 @@ def init_result(del_t, DA=False):
         return Results
 
     else:
-        # Concatenate
+
         # Create results dataframe
         Results = pd.DataFrame(np.nan, index=range(len(del_t)),
                                columns=model_columns)
 
         Results["Date"] = [x.strftime('%d/%m/%Y-%H:%S') for x in del_t]
+        # Reordenar las columnas para que 'Date' sea la primera
+        cols = ['Date'] + [col for col in Results if col != 'Date']
+        Results = Results[cols]
 
-        return Results
+        if cfg.write_stat_full:
+            stat_name_list = ['min', 'max', 'Q1',
+                              'Q3', 'median', 'mean', 'std']
+        else:
+            stat_name_list = ['mean', 'std']
+
+        sim_stat = {key: Results.copy() for key in stat_name_list}
+
+        if OL:
+            return sim_stat["mean"]
+
+        return sim_stat
 
 
 def forcing_table(lat_idx, lon_idx, step=0):
 
     nc_forcing_path = cfg.nc_forcing_path
-    frocing_var_names = cfg.frocing_var_names
+    forcing_var_names = cfg.forcing_var_names
     param_var_names = cfg.param_var_names
     date_ini = cfg.date_ini
     date_end = cfg.date_end
@@ -285,16 +289,13 @@ def forcing_table(lat_idx, lon_idx, step=0):
     else:
 
         prec = ifn.nc_array_forcing(nc_forcing_path, lat_idx, lon_idx,
-                                    frocing_var_names["Precip_var_name"],
+                                    forcing_var_names["Precip_var_name"],
                                     date_ini, date_end)
 
         temp = ifn.nc_array_forcing(nc_forcing_path, lat_idx, lon_idx,
-                                    frocing_var_names["Temp_var_name"],
+                                    forcing_var_names["Temp_var_name"],
                                     date_ini, date_end)
 
-        rel_humidity = ifn.nc_array_forcing(nc_forcing_path, lat_idx, lon_idx,
-                                            frocing_var_names["RH_var_name"],
-                                            date_ini, date_end)
         try:
             DMF = ifn.nc_array_forcing(nc_forcing_path, lat_idx, lon_idx,
                                        param_var_names["DMF_var_name"],
@@ -312,7 +313,6 @@ def forcing_table(lat_idx, lon_idx, step=0):
                                    "hours": del_t,
                                    "Prec": prec,
                                    "Ta": temp,
-                                   "RH": rel_humidity,
                                    "DMF": DMF})
 
         forcing_df["year"] = forcing_df["year"].dt.year
@@ -339,11 +339,9 @@ def unit_conversion(forcing_df):
 
     forcing_df.Prec = forcing_df.Prec * forcing_multiplier["Prec"]
     forcing_df.Ta = forcing_df.Ta * forcing_multiplier["Ta"]
-    forcing_df.RH = forcing_df.RH * forcing_multiplier["RH"]
 
     forcing_df.Prec = forcing_df.Prec + forcing_offset["Prec"]
     forcing_df.Ta = forcing_df.Ta + forcing_offset["Ta"]
-    forcing_df.RH = forcing_df.RH + forcing_offset["RH"]
 
     # Save some space
     with warnings.catch_warnings():

@@ -13,6 +13,7 @@ import numpy as np
 import pandas as pd
 import netCDF4 as nc
 import datetime as dt
+from copy import deepcopy
 from scipy.spatial import distance, cKDTree
 from scipy.sparse import lil_matrix, csc_array, issparse, eye
 import sksparse
@@ -39,8 +40,8 @@ elif cfg.numerical_model == 'snow17':
 else:
     raise Exception('Model not implemented')
 from statsmodels.stats.weightstats import DescrStatsW
-import pdcast as pdc
-import warnings
+from fnmatch import fnmatchcase
+from threadpoolctl import threadpool_limits
 
 
 def GC(d, c):
@@ -901,7 +902,7 @@ def read_distances(lat_idx, lon_idx):
     return distances
 
 
-def create_neigb(lat_idx, lon_idx, step, j):
+def create_neigb(lat_idx, lon_idx, step, j, sim_dic=None):
 
     mask = cfg.nc_maks_path
 
@@ -945,9 +946,6 @@ def create_neigb(lat_idx, lon_idx, step, j):
             lon=neigb[x, 1])
             for x in range(neigb.shape[0])]
 
-        neigb = [os.path.join(cfg.save_ensemble_path, neigb[x])
-                 for x in range(len(neigb))]
-
     else:
         neigb = ["{step}_{j}it_ensbl_{lat}_{lon}_obsTrue.pkl.blp".
                  format(step=step,
@@ -955,9 +953,6 @@ def create_neigb(lat_idx, lon_idx, step, j):
                         lat=neigb[x, 0],
                         lon=neigb[x, 1])
                  for x in range(neigb.shape[0])]
-
-        neigb = [os.path.join(cfg.save_ensemble_path, neigb[x])
-                 for x in range(len(neigb))]
 
     # add current cell
     if j == 0:
@@ -978,14 +973,19 @@ def create_neigb(lat_idx, lon_idx, step, j):
     neigb = list(dict.fromkeys(neigb))
 
     # remove files if they do not exist
-    check = [i for i in neigb if os.path.isfile(i)]
+    if cfg.spatial_in_mem:
+        check = [i for i in neigb if i in sim_dic.keys()]
+    else:
+        neigb = [os.path.join(cfg.save_ensemble_path, neigb[x])
+                 for x in range(len(neigb))]
+        check = [i for i in neigb if os.path.isfile(i)]
 
     return check
 
 
-def get_neig_info(lat_idx, lon_idx, step, j):
+def get_neig_info(lat_idx, lon_idx, step, j, sim_dic):
 
-    files = create_neigb(lat_idx, lon_idx, step, j)
+    files = create_neigb(lat_idx, lon_idx, step, j, sim_dic)
 
     neig_obs = []
     neig_pred_obs = []
@@ -1005,7 +1005,12 @@ def get_neig_info(lat_idx, lon_idx, step, j):
     for count, file in enumerate(files):
 
         try:  # If the file do not have observations, it will fail
-            ens_tmp = ifn.io_read(file)
+
+            if cfg.spatial_in_mem:
+                ens_tmp = ifn.io_read(sim_dic[file], in_mem=True)
+            else:
+                ens_tmp = ifn.io_read(file)
+
         except FileNotFoundError:
             continue
 
@@ -1166,7 +1171,9 @@ def generate_local_rho(curren_lat, current_lon, neig_lat, neig_long):
     return rho_par_predicted_obs, rho_predicted_obs
 
 
-def create_ensemble_cell(lat_idx, lon_idx, ini_DA_window, step, gsc_count):
+def create_ensemble_cell(lat_idx, lon_idx, ini_DA_window,
+                         step, gsc_count, sim_dic=None,
+                         in_mem=cfg.spatial_in_mem):
 
     real_time_restart = cfg.real_time_restart
 
@@ -1175,15 +1182,15 @@ def create_ensemble_cell(lat_idx, lon_idx, ini_DA_window, step, gsc_count):
                                                                     step)
     # subset forcing and observations
     # subset forcing, errors and observations
-    observations_sbst = observations[time_dict["Assimilaiton_steps"][step]:
-                                     time_dict["Assimilaiton_steps"][step
+    observations_sbst = observations[time_dict["Assimilation_steps"][step]:
+                                     time_dict["Assimilation_steps"][step
                                                                      + 1]]
-    error_sbst = errors[time_dict["Assimilaiton_steps"][step]:
-                        time_dict["Assimilaiton_steps"][step
+    error_sbst = errors[time_dict["Assimilation_steps"][step]:
+                        time_dict["Assimilation_steps"][step
                                                         + 1]]
 
-    forcing_sbst = main_forcing[time_dict["Assimilaiton_steps"][step]:
-                                time_dict["Assimilaiton_steps"][step + 1]]\
+    forcing_sbst = main_forcing[time_dict["Assimilation_steps"][step]:
+                                time_dict["Assimilation_steps"][step + 1]]\
         .copy()
 
     obs_flag = ~np.isnan(observations_sbst).all()
@@ -1194,7 +1201,6 @@ def create_ensemble_cell(lat_idx, lon_idx, ini_DA_window, step, gsc_count):
         lon=lon_idx,
         obs=obs_flag)
 
-    name_ensemble_end = os.path.join(cfg.save_ensemble_path, name_ensemble_end)
     # If file exists adn restart = True, continue to next
     if cfg.restart_run and os.path.isfile(name_ensemble_end):
 
@@ -1232,13 +1238,16 @@ def create_ensemble_cell(lat_idx, lon_idx, ini_DA_window, step, gsc_count):
                    lon=lon_idx,
                    obs=obs_flag)
 
-        name_ensemble = os.path.join(cfg.output_path, name_ensemble)
-
-        Ensemble = ifn.io_read(name_ensemble)
+        if in_mem:
+            Ensemble = deepcopy(ifn.io_read(
+                sim_dic[name_ensemble], in_mem=True))
+        else:
+            name_ensemble = os.path.join(cfg.output_path, name_ensemble)
+            Ensemble = ifn.io_read(name_ensemble)
 
     # Ensemble.create(forcing_sbst, observations_sbst, error_sbst, step)
 
-    if time_dict["Assimilaiton_steps"][step] in ini_DA_window:
+    if time_dict["Assimilation_steps"][step] in ini_DA_window:
         GSC_filename = (str(gsc_count) + '_GSC.nc')
 
         Ensemble.create(forcing_sbst, observations_sbst, error_sbst,  step,
@@ -1250,7 +1259,15 @@ def create_ensemble_cell(lat_idx, lon_idx, ini_DA_window, step, gsc_count):
     # Save space. Not possible. If save space and no local or neig obs, the
     # output would be broken
     # Ensemble.save_space()
-    ifn.io_write(name_ensemble_end, Ensemble)
+
+    if in_mem:
+        Ensemble.reduce_precision()
+        ens_comp = ifn.io_write(Ensemble, in_mem=True)
+        return {name_ensemble_end: ens_comp}
+    else:
+        name_ensemble_end = os.path.join(
+            cfg.save_ensemble_path, name_ensemble_end)
+        ifn.io_write(name_ensemble_end, Ensemble)
 
 
 def wait_for_ensembles(step, HPC_task_id, j=None):
@@ -1325,7 +1342,8 @@ def wait_for_ensembles(step, HPC_task_id, j=None):
                                                                  j=j)))
 
 
-def spatial_assim(lat_idx, lon_idx, step, j):
+def spatial_assim(lat_idx, lon_idx, step, j,
+                  sim_dic=None, in_mem=cfg.spatial_in_mem):
 
     vars_to_perturbate = cfg.vars_to_perturbate
 
@@ -1340,12 +1358,20 @@ def spatial_assim(lat_idx, lon_idx, step, j):
                                                                     lat=lat_idx,
                                                                     lon=lon_idx)
 
-    file = os.path.join(cfg.save_ensemble_path, file)
-    file = glob.glob(file)[0]  # trick to find the local ensemble
+    # trick to find the local ensemble
+    if in_mem:
+        file = [k for k in sim_dic.keys() if fnmatchcase(k, file)][0]
+    else:
+        file = os.path.join(cfg.save_ensemble_path, file)
+        file = glob.glob(file)[0]
+
     # in both obs:TRUE/FALSE using wildcards
     try:  # If current cell do not exist return None
+        if in_mem:
+            Ensemble = deepcopy(ifn.io_read(sim_dic[file], in_mem=True))
+        else:
 
-        Ensemble = ifn.io_read(file)
+            Ensemble = ifn.io_read(file)
 
     except FileNotFoundError:
         print('Not found: ' + file)
@@ -1361,8 +1387,6 @@ def spatial_assim(lat_idx, lon_idx, step, j):
                lon=lon_idx,
                obs=obs_flag)
 
-    name_ensemble = os.path.join(cfg.save_ensemble_path, name_ensemble)
-
     if cfg.restart_run and os.path.isfile(name_ensemble):
         # If file exists, continue to next
         return None
@@ -1371,7 +1395,7 @@ def spatial_assim(lat_idx, lon_idx, step, j):
     try:
 
         neig_obs, neig_pred_obs, neig_r_cov, neig_lat, neig_long = \
-            get_neig_info(lat_idx, lon_idx, step, j)
+            get_neig_info(lat_idx, lon_idx, step, j, sim_dic)
 
         # in case var_to_prop != var_to_assim, get_neig_info gets only the neigborhood obs and not the local observation:
         # add the local observations and coordinates in case some variables are not spatially propagated.
@@ -1387,14 +1411,13 @@ def spatial_assim(lat_idx, lon_idx, step, j):
                                  neig_lat, neig_long)
 
         # if no obs do nothing
-            
+
         if len(neig_obs) == 0:
             save_space_flag = False
             Ensemble.iter_update(create=False)
 
         else:
             save_space_flag = True
-
 
             # create neig rho
             rho_par_predicted_obs, rho_predicted_obs = generate_local_rho(
@@ -1418,31 +1441,32 @@ def spatial_assim(lat_idx, lon_idx, step, j):
             # translate paramsto normal distribution
             prior = flt.transform_space(prior, 'to_normal')
 
-            try:
+            with threadpool_limits(limits=4):
+                try:
 
-                updated_pars = flt.ens_klm(prior, neig_obs, neig_pred_obs,
-                                           cfg.max_iterations, neig_r_cov,
-                                           rho_AB=rho_par_predicted_obs,
-                                           rho_BB=rho_predicted_obs,
-                                           stochastic=False)
-            # Avoid crash if there are no local obs
-            # and there is only one obs in neig
-            except Exception as ex:
-                print('({ex}) update fail, trying with rho=1:'
-                      '{lat}:lat_idx, {lon}:lon_idx'.
-                      format(lat=lat_idx, lon=lon_idx, ex=ex))
-                updated_pars = flt.ens_klm(prior, neig_obs, neig_pred_obs,
-                                           cfg.max_iterations, neig_r_cov,
-                                           stochastic=False)
+                    updated_pars = flt.ens_klm(prior, neig_obs, neig_pred_obs,
+                                               cfg.max_iterations, neig_r_cov,
+                                               rho_AB=rho_par_predicted_obs,
+                                               rho_BB=rho_predicted_obs,
+                                               stochastic=False)
+                # Avoid crash if there are no local obs
+                # and there is only one obs in neig
+                except Exception as ex:
+                    print('({ex}) update fail, trying with rho=1:'
+                          '{lat}:lat_idx, {lon}:lon_idx'.
+                          format(lat=lat_idx, lon=lon_idx, ex=ex))
+                    updated_pars = flt.ens_klm(prior, neig_obs, neig_pred_obs,
+                                               cfg.max_iterations, neig_r_cov,
+                                               stochastic=False)
 
-            updated_pars = flt.transform_space(updated_pars, 'from_normal')
+                updated_pars = flt.transform_space(updated_pars, 'from_normal')
 
             Ensemble.iter_update(step, updated_pars,
                                  create=True, iteration=j)
 
     except Exception as ex:  # if any error, dont update
         # TODO: Fix this except. guess al possible errors
-        print('({ex}) Cel not updated: {lat}:lat_idx, {lon}:lon_idx'.
+        print('({ex}) Cell not updated: {lat}:lat_idx, {lon}:lon_idx'.
               format(lat=lat_idx, lon=lon_idx, ex=ex))
 
         save_space_flag = False
@@ -1450,19 +1474,21 @@ def spatial_assim(lat_idx, lon_idx, step, j):
 
     # Save updated ensemble
     if j < cfg.max_iterations-1 and save_space_flag:
-        try: 
-            Ensemble.save_space()
-        except:
-            print('Could not save space at step:{step} and j={j} for cell: {lat}:lat_idx, {lon}:lon_idx'.format(lat=lat_idx, lon=lon_idx,step=step,j=j))
+        Ensemble.save_space()
+    if j == cfg.max_iterations-1:
+        Ensemble.rm_forz()
+
+    if in_mem:
+        Ensemble.reduce_precision()
+        ens_comp = ifn.io_write(Ensemble, in_mem=True)
+        return {name_ensemble: ens_comp}
+    else:
+        name_ensemble = os.path.join(cfg.save_ensemble_path, name_ensemble)
+        ifn.io_write(name_ensemble, Ensemble)
+        return None
 
 
-
-    ifn.io_write(name_ensemble, Ensemble)
-
-    return None
-
-
-def collect_results(lat_idx, lon_idx):
+def collect_results(lat_idx, lon_idx, list_of_simdic):
 
     date_ini = cfg.date_ini
     date_end = cfg.date_end
@@ -1481,37 +1507,52 @@ def collect_results(lat_idx, lon_idx):
     # loop over files to retrieve results
     ini_DA_window = domain_steps()
 
-    # create filenames
-    DA_Results = model.init_result(del_t, DA=True)  # DA parameter
-    updated_Sim = model.init_result(del_t)  # posterior simulaiton
-    sd_Sim = model.init_result(del_t)       # posterios stndr desv
-    OL_Sim = model.init_result(del_t)       # OL simulation
+    if cfg.write_stat_full:
+        stat_name_list = ['min', 'max', 'Q1', 'Q3', 'median', 'mean', 'std']
+    else:
+        stat_name_list = ['mean', 'std']
 
     # HACK: fake time_dict
-    time_dict = {'Assimilaiton_steps':
-                 np.append(ini_DA_window, len(del_t))}
+    time_dict = {'Assimilation_steps':
+                 np.append(ini_DA_window, len(del_t)),
+                 'del_t': ifn.generate_dates(date_ini, date_end)}
+
+    # create filenames
+    DA_Results = model.init_result(time_dict["del_t"], DA=True)  # DA parameter
+    OL_Sim = model.init_result(
+        time_dict["del_t"], OL=True)       # OL simulation
+    poste_stat = model.init_result(time_dict["del_t"])
 
     # loop over DA steps
     for step in range(len(ini_DA_window)):
 
-        fname = os.path.join(
-            cfg.output_path,
-            "{step}_{j}it_ensbl_{lat_idx}_{lon_idx}_obs*.pkl.blp".format(
-                step=step,
-                j=cfg.max_iterations - 1,
-                lat_idx=lat_idx,
-                lon_idx=lon_idx))
-        fname = glob.glob(fname)[0]
-
         # Open file
+        fname = "{step}_{j}it_ensbl_{lat_idx}_{lon_idx}_obs*.pkl.blp".format(
+            step=step,
+            j=cfg.max_iterations - 1,
+            lat_idx=lat_idx,
+            lon_idx=lon_idx)
+
         try:
-            Ensemble = ifn.io_read(fname)
+            if cfg.spatial_in_mem:
+                fname = [k for k in list_of_simdic[step].keys()
+                         if fnmatchcase(k, fname)][0]
+                Ensemble = deepcopy(ifn.io_read(list_of_simdic[step][fname],
+                                                in_mem=True))
+
+            else:
+                fname = os.path.join(cfg.output_path, fname)
+                fname = glob.glob(fname)[0]
+                Ensemble = ifn.io_read(fname)
+
         except FileNotFoundError:
             continue
 
         # Rm de ensemble file
         if os.path.isfile(fname):
             os.remove(fname)
+        if cfg.spatial_in_mem:
+            list_of_simdic[step][fname] = None
 
         step_results = {}
         # extract psoterior parameters
@@ -1534,7 +1575,7 @@ def collect_results(lat_idx, lon_idx):
         model.storeDA(DA_Results, step_results, Ensemble.observations,
                       Ensemble.errors, time_dict, step)
 
-        model.store_sim(updated_Sim, sd_Sim, Ensemble,
+        model.store_sim(poste_stat, Ensemble,
                         time_dict, step)
 
 
@@ -1546,22 +1587,8 @@ def collect_results(lat_idx, lon_idx):
         pass
 
     # Write results
-    with warnings.catch_warnings():
-        warnings.simplefilter('ignore')
-
-        DA_Results = pdc.downcast(DA_Results,
-                                  numpy_dtypes_only=True)
-        OL_Sim = pdc.downcast(OL_Sim,
-                              numpy_dtypes_only=True)
-        updated_Sim = pdc.downcast(updated_Sim,
-                                   numpy_dtypes_only=True)
-        sd_Sim = pdc.downcast(sd_Sim,
-                              numpy_dtypes_only=True)
-
-    cell_data = {"DA_Results": DA_Results,
-                 "OL_Sim": OL_Sim,
-                 "updated_Sim": updated_Sim,
-                 "sd_Sim": sd_Sim}
+    cell_data = {**{"DA_Results": DA_Results, "OL_Sim": OL_Sim},
+                 **{key+'_Post': poste_stat[key] for key in stat_name_list}, }
 
     filename = ("cell_" + str(lat_idx) + "_" + str(lon_idx) + ".pkl.blp")
     filename = os.path.join(cfg.output_path, filename)
@@ -1583,3 +1610,118 @@ def collect_results(lat_idx, lon_idx):
         Ensemble.origin_state = pd.DataFrame()
         Ensemble.state_membres = [0 for i in range(Ensemble.members)]
         ifn.io_write(name_restart, Ensemble)
+
+            # create netcdf to save distances line by line
+            spatial_propagation_storage_path = cfg.spatial_propagation_storage_path
+
+            name_dist = "dist_" + str(prior_id) + ".nc"
+            name_dist = os.path.join(spatial_propagation_storage_path, name_dist)
+
+            f = nc.Dataset(name_dist, 'w', format='NETCDF4')
+
+            f.createDimension('Y', coords.shape[0])
+            f.createDimension('X', coords.shape[0])
+
+            # float 64 is necesary, otherwise distance matrix is not PD
+            distnc = f.createVariable('Dist', np.float64, ('Y', 'X'),
+                                    zlib=True, complevel=4, fletcher32=True,
+                                    chunksizes=(coords.shape[0], 1))
+
+            f.close()
+
+            # allocate lil_mat
+
+            rho_spar = lil_matrix((coords.shape[0], coords.shape[0]))
+            rho_spar = [rho_spar.copy() for _ in range(len(c))]
+
+            ids = np.argsort(orderows)  # ids to recover distance mat geometry
+            dist_nc = nc.Dataset(name_dist, 'a')
+
+            # loop over rows to avoid calculate all distances
+
+            for n in range(coords.shape[0]):
+                print(n)
+
+                tmp_row = coords[orderows[n], :][np.newaxis, :]
+
+                tmp_dis = distance.cdist(coords[orderows, :],
+                                        tmp_row,
+                                        cfg.dist_algo)
+
+                # compute GC row by row
+                rho_tmp = [GC(tmp_dis, c[nn]) for nn in range(len(c))]
+
+                # Insert row rho in the preallocated lil_mat
+                for nn in range(len(c)):
+                    rho_spar[nn][n, :] = rho_tmp[nn]
+
+                # Saves row distances in the netcdf
+                tmp_dis[tmp_dis > max(c)*2] = np.nan
+                dist_nc['Dist'][:, ids[n]] = tmp_dis[orderows]
+                # d = d[:, orderows][orderows]
+            dist_nc.close()
+
+            # transform frmo lil_mat to csc to perform the chol latter
+            rho = [csc_array(nn) for nn in rho_spar]
+        elif cfg.distance_mat_calc == 'Regular':
+
+            d = distance.cdist(coords[orderows, :],
+                            coords[orderows, :],
+                            cfg.dist_algo)
+
+            d[d > max(c)*2] = np.nan
+            save_distance(d, orderows, prior_id)
+
+            # Transform to sparse matrix
+            rho = [csc_array(GC(d, c_par)) for c_par in c]
+
+        elif cfg.distance_mat_calc == 'KDtree':
+            # raise Exception('KDtree implementation not finished yet')
+
+            A = cKDTree(coords[orderows, :])
+
+            d = A.sparse_distance_matrix(A,  max(c)*2, p=2.0,
+                                        output_type='coo_matrix')
+            # Scompute correlations01
+
+            data_dense = [GC(d.data, c_par) for c_par in c]
+
+            # desnse values
+            rho = [d.copy() for _ in range(len(c))]
+
+            for i in range(len(c)):
+                rho[i].data = data_dense[i]
+                rho[i] = csc_array(rho[i])
+
+            d = csc_array(d)
+            d = d[:, orderows][orderows]  # ORDER complete matrix
+
+            # SAVEMATRAIXHERE
+            # create netcdf to save distances line by line
+            spatial_propagation_storage_path = cfg.spatial_propagation_storage_path
+
+            name_dist = "dist_" + str(prior_id) + ".nc"
+            name_dist = os.path.join(spatial_propagation_storage_path, name_dist)
+
+            f = nc.Dataset(name_dist, 'w', format='NETCDF4')
+
+            f.createDimension('Y', coords.shape[0])
+            f.createDimension('X', coords.shape[0])
+
+            # float 64 is necesary, otherwise distance matrix is not PD
+            distnc = f.createVariable('Dist', np.float64, ('Y', 'X'),
+                                    zlib=True, complevel=4, fletcher32=True,
+                                    chunksizes=(coords.shape[0], 1))
+
+            for n in range(coords.shape[0]):
+                # Save line by line, to not todense() the whole d matrix
+                print(n)
+
+                tmp_dis = d[:, [n]].todense()
+                # NOTE: this masks the current cell, but the current cell
+                # is added anyway when the neig is created
+                tmp_dis[tmp_dis == 0.] = np.nan
+                tmp_dis[n] = 0.  # put 0 in diagonal
+
+                distnc[:, n] = tmp_dis
+            f.close()

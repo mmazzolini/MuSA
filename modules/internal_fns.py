@@ -7,6 +7,7 @@ assimilation functions.
 Author: Esteban Alonso González - alonsoe@ipe.csic.es
 """
 
+from multiprocessing import TimeoutError
 import glob
 import os
 import shutil
@@ -53,6 +54,22 @@ def pre_cheks():
         fsm_filename = os.path.join(cfg.fsm_src_path, "FSM2")
         if os.path.isfile(fsm_filename):
             warnings.warn("FSM binary exists, reusing compile options")
+
+    if cfg.write_stat_full and cfg.restart_run:
+        raise Exception(
+            "write_stat_full and restart_run cannot be activated \
+                simultaneously. To be implemented.")
+
+    if cfg.write_stat_daily and cfg.restart_run:
+        raise Exception(
+            "write_stat_daily and restart_run cannot be activated \
+                simultaneously. To be implemented.")
+    if cfg.da_algorithm not in ["ES", "IES"] and cfg.implementation ==\
+            'Spatial_propagation':
+        raise Exception("Spatial_propagation needs ES/IES methods")
+
+    if cfg.spatial_in_mem and cfg.parallelization == "HPC.array":
+        raise Exception("spatial_in_mem not compatible with HPC.array")
 
 
 def last_line(filename):
@@ -118,20 +135,38 @@ def change_chunk_size_nccopy(input_file):
               "Manual chunking is recommended")
 
 
-def io_write(filename, obj):
-    # TODO: Explore more compression options
-    with open(filename, "wb") as f:
-        pickled_data = pickle.dumps(obj)
-        compressed_pickle = blosc.compress(pickled_data)
-        f.write(compressed_pickle)
+def io_write(filename_or_obj, obj=None, codec="lz4", clevel=3, in_mem=False):
+    """
+    Serializa y comprime un objeto con pickle+blosc.
+    Si in_mem=True, devuelve un buffer de bytes.
+    Si in_mem=False, escribe a un archivo.
+    """
+    pickled = pickle.dumps(filename_or_obj if in_mem else obj,
+                           protocol=pickle.HIGHEST_PROTOCOL)
+
+    compressed = blosc.compress(pickled, cname=codec, clevel=clevel)
+
+    if in_mem:
+        return compressed
+    else:
+        with open(filename_or_obj, "wb") as f:
+            f.write(compressed)
 
 
-def io_read(filename):
-    with open(filename, "rb") as f:
-        compressed_pickle = f.read()
-        depressed_pickle = blosc.decompress(compressed_pickle)
-        obj = pickle.loads(depressed_pickle)
-        return obj
+def io_read(source, in_mem=False):
+    """
+    Lee un objeto serializado con io_write.
+    Si in_mem=True, 'source' debe ser un buffer de bytes.
+    Si in_mem=False, 'source' es el filename.
+    """
+    if in_mem:
+        compressed = source
+    else:
+        with open(source, "rb") as f:
+            compressed = f.read()
+
+    decompressed = blosc.decompress(compressed)
+    return pickle.loads(decompressed)
 
 
 def reduce_size_state(df_state, observations):
@@ -173,112 +208,107 @@ def downcast_output(output):
 
 
 def chunker(seq, size):
-    """
-    Splits a sequence into chunks of a given size.
-
-    Parameters:
-    seq (list): The sequence to be split.
-    size (int): The size of each chunk.
-
-    Returns:
-    list: A list of chunks.
-    """
-    return [seq[pos:pos + size] for pos in range(0, len(seq), size)]
+    """Split a list into chunks of size `size`."""
+    return [seq[i:i + size] for i in range(0, len(seq), size)]
 
 
 def pool_wrap(func, inputs, nprocess, timeout=None):
     """
-    Wraps the multiprocessing pool or MPI pool execution.
-
-    Parameters:
-    func (callable): The function to be executed in parallel.
-    inputs (list): The input arguments for the function.
-    nprocess (int): The number of processes to use.
-    timeout (int, optional): The maximum time to wait for the results.
-
-    Raises:
-    TimeoutError: If the pool execution times out.
-    Exception: If any other error occurs during pool execution.
+    Ejecuta `func` en paralelo con starmap.
+    `inputs` = lista de tuplas.
+    Devuelve la lista de resultados de func().
     """
     if cfg.MPI:
         with MPIPoolExecutor() as pool:
-
-            pool.starmap(func, inputs,  timeout=timeout)
+            return pool.starmap(func, inputs, timeout=timeout)
 
     else:
-        pool = mp.Pool(processes=nprocess)
-        result = pool.starmap_async(func, inputs)
-        try:
-            if timeout:
-                # Wait until the result is ready or timeout
-                result.get(timeout)
-            else:
-                result.get()
+        with mp.Pool(processes=nprocess) as pool:
+            async_result = pool.starmap_async(func, inputs)
+            try:
+                return async_result.get(timeout=timeout)
 
-        except Exception:
-            # Terminate the pool if an exception occurs
-            pool.terminate()
-            pool.join()
-            gc.collect()
-            raise
-        finally:
-            # Ensure the pool is terminated even if no exception occurs
-            pool.terminate()
-            pool.join()
-            gc.collect()
+            except TimeoutError:
+                pool.terminate()
+                pool.join()
+                gc.collect()
+                raise
+
+            except Exception:
+                pool.terminate()
+                pool.join()
+                gc.collect()
+                raise
 
 
-def safe_pool(func, inputs, nprocess):
+def safe_pool(func, inputs, nprocess, in_mem=False):
     """
-    Safely executes a function in parallel, restarting the pool if it freezes.
+    Ejecuta func en paralelo por chunks.
+    Si in_mem=True → devuelve un diccionario con los resultados acumulados.
+    Si in_mem=False → no devuelve nada (comportamiento original).
 
-    Parameters:
-    func (callable): The function to be executed in parallel.
-    inputs (list): The input arguments for the function.
-    nprocess (int): The number of processes to use.
-    cells_per_process (int, optional): The multiplier to calculate maximum
-    cells per process.
-    timeout (int, optional): The maximum time to wait for each chunk.
-
-    This function divides the inputs into chunks and executes them in parallel.
-    If the pool freezes, it will restart and retry the execution.
+    inputs debe ser una lista de listas:
+        inputs = [arg1_list, arg2_list, ...]
     """
-    cells_per_process = cfg.cells_per_process
+    # Normaliza inputs para evitar problemas con iteradores
+    inputs = [list(arg) for arg in inputs]
+
+    cells_per_process = cfg.cells_per_process or 1
     timeout = cfg.timeout
 
-    if not cells_per_process:
-        cells_per_process = 1
+    ncellsmax = cells_per_process * nprocess
 
-    ncellsmax = cells_per_process * nprocess  # Maximum cells per process
+    # chunk por cada argumento independiente
+    inputs_chunks = [chunker(arg, ncellsmax) for arg in inputs]
+    nchunks = len(inputs_chunks[0])
 
-    inputs_chunk = [chunker(x, ncellsmax) for x in inputs]
+    # Diccionario acumulado en memoria si se solicita
+    results_dict = {} if in_mem else None
 
-    for chunk_id in range(len(inputs_chunk[0])):
-        chunked_list = [item[chunk_id] for item in inputs_chunk]
+    for chunk_id in range(nchunks):
 
+        # Extrae el chunk de cada argumento
+        chunk_args = [arg_chunks[chunk_id] for arg_chunks in inputs_chunks]
+
+        # Empaqueta en lista de tuplas para starmap
+        chunk_input = list(zip(*chunk_args))
+
+        # Retry loop en caso de freeze
         while True:
-            chunked_zip = zip(*chunked_list)
-
             try:
-                pool_wrap(func, chunked_zip, nprocess, timeout=timeout)
-                break  # Exit the loop if execution is successful
-            except mp.context.TimeoutError:
-                print("The pool has frozen. Restarting...")
+                # Ejecuta el pool y recoge resultados
+                results = pool_wrap(func, chunk_input,
+                                    nprocess, timeout=timeout)
 
-                time.sleep(10)
-                pass
+                # Si hay que acumular resultados en memoria
+                if in_mem:
+                    for r in results:
+                        if isinstance(r, dict):
+                            results_dict.update(r)
+                        else:
+                            # si no es dict, generamos clave automáticamente
+                            results_dict[len(results_dict)] = r
+
+                break  # chunk completado → siguiente chunk
+
+            except TimeoutError:
+                print("Pool frozen. Restarting chunk", chunk_id)
+                time.sleep(2)
+                continue
+
+    return results_dict
 
 
 def get_dates_obs():
 
     dates_obs = cfg.dates_obs
 
-    if type(dates_obs) == list:
+    if isinstance(dates_obs, list):
 
         dates_obs.sort()
         dates_obs = np.asarray([dt.datetime.strptime(date, "%Y-%m-%d %H:%M")
                                 for date in dates_obs])
-    elif type(dates_obs) == str:
+    elif type(dates_obs) is str:
 
         dates_obs = pd.read_csv(dates_obs, header=None)
         dates_obs = dates_obs.iloc[:, 0].tolist()
@@ -339,9 +369,22 @@ def obs_array(dates_obs, lat_idx, lon_idx):
 
             data_tmp = nc.Dataset(ncfile)
 
-            if obs_var in data_tmp.variables.keys():
+            nc_value = data_tmp.variables[obs_var][:, lat_idx, lon_idx]
+            # Check if masked
+            # TODO: Check if there is a better way to do this
+            if np.ma.is_masked(nc_value):
+                nc_value = nc_value.filled(np.nan)
+            else:
+                nc_value = np.ma.getdata(nc_value)
 
-                nc_value = data_tmp.variables[obs_var][:, lat_idx, lon_idx]
+            tmp_obs_storage.extend(nc_value)
+
+            # do the same conditionally for errors
+
+            if r_cov == 'dynamic_error':
+
+                nc_value = data_tmp.variables[cfg.obs_error_var_names[cont]
+                                              ][:, lat_idx, lon_idx]
                 # Check if masked
                 # TODO: Check if there is a better way to do this
                 if np.ma.is_masked(nc_value):
@@ -349,28 +392,11 @@ def obs_array(dates_obs, lat_idx, lon_idx):
                 else:
                     nc_value = np.ma.getdata(nc_value)
 
-                tmp_obs_storage.extend(nc_value)
-
-                # do the same conditionally for errors
-
-                if r_cov == 'dynamic_error':
-
-                    nc_value = data_tmp.variables[cfg.obs_error_var_names[cont]
-                                                  ][:, lat_idx, lon_idx]
-                    # Check if masked
-                    # TODO: Check if there is a better way to do this
-                    if np.ma.is_masked(nc_value):
-                        nc_value = nc_value.filled(np.nan)
-                    else:
-                        nc_value = np.ma.getdata(nc_value)
-
-                    tmp_error_storage.extend(nc_value)
-                else:
-
-                    tmp_error_storage = [r_cov[cont]] * len(tmp_obs_storage)
+                tmp_error_storage.extend(nc_value)
             else:
-                tmp_obs_storage.extend([np.nan])
-                tmp_error_storage.extend([np.nan])
+
+                tmp_error_storage = [r_cov[cont]] * len(tmp_obs_storage)
+
             data_tmp.close()
 
         array_obs[obs_idx] = tmp_obs_storage
@@ -384,8 +410,8 @@ def obs_array(dates_obs, lat_idx, lon_idx):
     error_matrix = np.squeeze(error_matrix)
     # check if num of dates == num of observations
     #    if obs_matrix.shape[0] != len(dates_obs):
-    #        raise Exception("Number of dates different of number of obs files")
-    
+    #       raise Exception("Number of dates different of number of obs files")
+
     # add lowest value possible to avoid numerical issues if for some reason
     # r_cov == 0
     error_matrix = error_matrix + np.finfo(type(error_matrix[0])).eps
@@ -396,7 +422,7 @@ def generate_dates(date_ini, date_end, timestep=cfg.dt):
     """
     Generate a list of dates starting from date_ini to date_end with a given
     timestep in seconds.
-    
+
     Args:
         date_ini (datetime): Start date and time.
         date_end (datetime): End date and time.
@@ -410,7 +436,7 @@ def generate_dates(date_ini, date_end, timestep=cfg.dt):
     """
     if not isinstance(timestep, (int, float)) or timestep <= 0:
         raise ValueError("timestep must be a positive number in seconds.")
-    
+
     del_t = [date_ini]
     date_time = date_ini
     time_delta = dt.timedelta(seconds=timestep)
@@ -423,7 +449,7 @@ def generate_dates(date_ini, date_end, timestep=cfg.dt):
     if date_end != del_t[-1]:
         raise Exception("Wrong date_ini or date_end (or both), \
                         not compatible with the given timestep.")
-    
+
     return np.asarray(del_t)
 
 
@@ -559,7 +585,7 @@ def simulation_steps(observations, dates_obs):
     date_end = dt.datetime.strptime(date_end, "%Y-%m-%d %H:%M")
 
     del_t = generate_dates(date_ini, date_end)
-    
+
     obs_idx = np.searchsorted(del_t, dates_obs)
 
     # Remove observation NaNs from simulations steps
@@ -584,7 +610,7 @@ def simulation_steps(observations, dates_obs):
         assimilation_steps = 0
     else:
         if da_algorithm in ['PBS', 'ES', 'IES', 'IES-MCMC', 'IES-MCMC_AI',
-                            'PIES', 'AdaPBS', 'AdaMuPBS']:
+                            'PIES', 'ProPBS', 'AdaPBS']:
             assimilation_steps = season_ini_cuts[:, 0]
         elif (da_algorithm in ['PF', 'EnKF', 'IEnKF']):
             # HACK: I add one to easy the subset of the forcing
@@ -601,12 +627,13 @@ def simulation_steps(observations, dates_obs):
 
     return {"del_t": del_t,
             "obs_idx": obs_idx,
-            "Assimilaiton_steps": assimilation_steps}
+            "Assimilation_steps": assimilation_steps}
 
 
 def run_model_openloop(lat_idx, lon_idx, main_forcing, filename):
 
-    print("No observations in: " + str(lat_idx) + "," + str(lon_idx))
+    if cfg.da_algorithm != 'deterministic_OL':
+        print("No observations in: " + str(lat_idx) + "," + str(lon_idx))
     # create temporal simulation
     temp_dest = model.model_copy(lat_idx, lon_idx)
     real_forcing = main_forcing.copy()
@@ -626,4 +653,3 @@ def run_model_openloop(lat_idx, lon_idx, main_forcing, filename):
         shutil.rmtree(os.path.split(temp_dest)[0], ignore_errors=True)
     except TypeError:
         pass
-

@@ -7,13 +7,14 @@ Author: Esteban Alonso González - alonsoe@ipe.csic.es
 """
 import numpy as np
 import numba as nb
-import constants as cnt
+import config as cfg
 
 
 @nb.njit(fastmath=True, cache=True)
-def snow17(time, prec, tair, p_atm, lat, init, dt=24, scf=1.0, rvs=1,
-           uadj=0.04, mbase=1.0, mfmax=1.05, mfmin=0.6, tipm=0.1, nmf=0.15,
-           plwhc=0.04, pxtemp=1.0, pxtemp1=-1.0, pxtemp2=3.0):
+def snow17(time, prec, tair, p_atm, lat, init,
+           uadj, mbase, mfmax, mfmin, tipm,
+           nmf, plwhc, pxtemp, pxtemp1, pxtemp2,
+           rcld, rmlt, rhof, trho):
     """
     Snow-17 accumulation and ablation model. This version of Snow-17 is
     intended for use at a point location.
@@ -24,10 +25,29 @@ def snow17(time, prec, tair, p_atm, lat, init, dt=24, scf=1.0, rvs=1,
 
     """
 
+    dt = (cfg.dt/3600)
+    rvs = 1
+
     # Convert to numpy array if scalars
     time = np.asarray(time)
     prec = np.asarray(prec)
     tair = np.asarray(tair)
+
+    # Convert param arrays in scalars
+    uadj = float(uadj[0])
+    mbase = float(mbase[0])
+    mfmax = float(mfmax[0])
+    mfmin = float(mfmin[0])
+    tipm = float(tipm[0])
+    nmf = float(nmf[0])
+    plwhc = float(plwhc[0])
+    pxtemp = float(pxtemp[0])
+    pxtemp1 = float(pxtemp1[0])
+    pxtemp2 = float(pxtemp2[0])
+    rcld = float(rcld[0])
+    rmlt = float(rmlt[0])
+    rhof = float(rhof[0])
+    trho = float(trho[0])
 
     # Initialization
     # Antecedent Temperature Index, deg C
@@ -40,6 +60,10 @@ def snow17(time, prec, tair, p_atm, lat, init, dt=24, scf=1.0, rvs=1,
     w_i = init[3]
     # Heat deficit, also known as NEGHS, Negative Heat Storage
     deficit = init[4]
+    # Previous SWE
+    preSWE = init[5]
+    # Previous density
+    prerho = init[6]
 
     # number of time steps
     nsteps = len(time)
@@ -87,7 +111,7 @@ def snow17(time, prec, tair, p_atm, lat, init, dt=24, scf=1.0, rvs=1,
 
         # Snow Accumulation
         # water equivalent of new snowfall (mm)
-        pn = precip * fracsnow * scf
+        pn = precip * fracsnow
         # w_i = accumulated water equivalent of the ice portion of the snow
         # cover (mm)
         w_i += pn
@@ -211,10 +235,17 @@ def snow17(time, prec, tair, p_atm, lat, init, dt=24, scf=1.0, rvs=1,
         model_swe[i] = swe  # total swe (mm) at this time step
         outflow[i] = e
 
-        # create restart point
-        init = np.array([ait, w_qx, w_q, w_i, deficit])
+    thikness, rhos = swe_to_thickness(model_swe, prerho, preSWE,
+                                      cfg.dt,
+                                      rcld,
+                                      rmlt,
+                                      rhof,
+                                      trho)
 
-    return model_swe, model_swe/cnt.FIX_density/1000, outflow, init
+    # create restart point
+    init = np.array([ait, w_qx, w_q, w_i, deficit, model_swe[-1], rhos])
+
+    return model_swe, thikness, outflow, init
 
 
 @nb.njit(fastmath=True, cache=True)
@@ -267,3 +298,53 @@ def melt_function(jday, dt, lat, mfmax, mfmin):
     meltf = (dt / 6) * ((sv * av * (mfmax - mfmin)) + mfmin)
 
     return meltf
+
+
+@nb.njit(fastmath=True, cache=True)
+def swe_to_thickness(swe, prerho, preSWE, dt, rcld, rmlt, rhof, trho):
+
+    n = len(swe)
+    thickness = np.zeros(n, dtype=float)
+    rhos = float(prerho) if (prerho is not None and np.isfinite(
+        prerho) and prerho > 0) else float(rhof)
+    prev_swe = float(preSWE)
+    exp_fac = np.exp(-dt / trho)
+
+    for i in range(n):
+        S = swe[i]
+        dS = S - prev_swe
+
+        # If no snow present
+        if S <= 0:
+            rhos = rhof
+            thickness[i] = 0.0
+            prev_swe = S
+            continue
+
+        # Accumulation: mix new snow (density rhof) with existing by volume
+        if dS > 0:
+            S_old = prev_swe
+            if S_old <= 0:
+                # new pack forms
+                rhos = rhof
+            else:
+                vol_old = S_old / rhos
+                vol_added = dS / rhof
+                vol_new = vol_old + vol_added
+                # new density mass/volume
+                rhos = (S_old + dS) / vol_new
+
+        # After mass change, apply relaxation toward targets:
+        if dS < 0:
+            # warm regime: relax toward rmlt if rhos < rmlt
+            if rhos < rmlt:
+                rhos = rmlt + (rhos - rmlt) * exp_fac
+        else:
+            # cold/accumulation regime: relax toward rcld if rhos < rcld
+            if rhos < rcld:
+                rhos = rcld + (rhos - rcld) * exp_fac
+
+        thickness[i] = S / rhos
+        prev_swe = S
+
+    return thickness, rhos

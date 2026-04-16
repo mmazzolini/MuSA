@@ -44,20 +44,41 @@ def prepare_forz(forcing_sbst):  # time, prec, tair, p_atm, lat
 
     Temp = forcing_sbst['Ta'].values
     prec = forcing_sbst["Prec"].values
-    p_atm = forcing_sbst["Prec"].values
+    p_atm = forcing_sbst["press"].values
     lat = forcing_sbst["XLAT"].values
+    uadj = forcing_sbst['uadj'].values
+    mbase = forcing_sbst['mbase'].values
+    mfmax = forcing_sbst['mfmax'].values
+    mfmin = forcing_sbst['mfmin'].values
+    tipm = forcing_sbst['tipm'].values
+    nmf = forcing_sbst['nmf'].values
+    plwhc = forcing_sbst['plwhc'].values
+    pxtemp = forcing_sbst['pxtemp'].values
+    pxtemp1 = forcing_sbst['pxtemp1'].values
+    pxtemp2 = forcing_sbst['pxtemp2'].values
+    rcld = forcing_sbst['rcld'].values
+    rmlt = forcing_sbst['rmlt'].values
+    rhof = forcing_sbst['rhof'].values
+    trho = forcing_sbst['trho'].values
 
-    return time_jday, prec*3600, Temp-cnt.KELVING_CONVER, p_atm*0.01, lat
+    return time_jday, prec*cfg.dt, Temp-cnt.KELVING_CONVER, p_atm*0.01, lat, \
+        uadj, mbase, mfmax, mfmin, tipm, nmf, plwhc, pxtemp, pxtemp1, pxtemp2,\
+        rcld, rmlt, rhof, trho
 
 
 def model_run(forcing_sbst, init=None):
 
-    time_jday, prec, tair, p_atm, lat = prepare_forz(forcing_sbst)
+    time_jday, prec, tair, p_atm, lat, uadj, mbase, mfmax, mfmin, tipm,\
+        nmf, plwhc, pxtemp, pxtemp1, pxtemp2, rcld, rmlt, rhof, trho =\
+        prepare_forz(forcing_sbst)
 
     if init is None:
-        init = np.zeros(5)
+        init = np.zeros(7)
 
-    SWE, snd, outflow, init = snow17(time_jday, prec, tair, p_atm, lat, init)
+    SWE, snd, outflow, init = snow17(time_jday, prec, tair, p_atm, lat, init,
+                                     uadj, mbase, mfmax, mfmin, tipm, nmf,
+                                     plwhc, pxtemp, pxtemp1, pxtemp2,
+                                     rcld, rmlt, rhof, trho)
 
     Results = pd.DataFrame({'SWE': SWE,
                             'snd': snd,
@@ -126,8 +147,8 @@ def storeDA(Result_df, step_results, observations_sbst, error_sbst,
     var_to_assim = cfg.var_to_assim
     error_names = cfg.obs_error_var_names
 
-    rowIndex = Result_df.index[time_dict["Assimilaiton_steps"][step]:
-                               time_dict["Assimilaiton_steps"][step + 1]]
+    rowIndex = Result_df.index[time_dict["Assimilation_steps"][step]:
+                               time_dict["Assimilation_steps"][step + 1]]
 
     if len(var_to_assim) > 1:
         for i, var in enumerate(var_to_assim):
@@ -155,17 +176,16 @@ def storeOL(OL_FSM, Ensemble, observations_sbst, time_dict, step):
         OL_FSM[name_col] = ol_data.iloc[:, [n]].to_numpy()
 
 
-def store_sim(updated_Sim, sd_Sim, Ensemble,
-              time_dict, step, MCMC=False, save_prior=False):
+def store_sim(sim_stat, Ensemble, time_dict, step,
+              MCMC=False, save_prior=False):
 
     if MCMC:
         list_state = copy.deepcopy(Ensemble.state_members_mcmc)
     else:
         list_state = copy.deepcopy(Ensemble.state_membres)
 
-    rowIndex = updated_Sim.index[time_dict["Assimilaiton_steps"][step]:
-                                 time_dict["Assimilaiton_steps"][step + 1]]
-
+    rowIndex = sim_stat['mean'].index[time_dict["Assimilation_steps"][step]:
+                                      time_dict["Assimilation_steps"][step + 1]]
     # Get updated columns
     if save_prior:
         pesos = np.ones_like(Ensemble.wgth)
@@ -173,20 +193,30 @@ def store_sim(updated_Sim, sd_Sim, Ensemble,
         pesos = Ensemble.wgth
 
     for n, name_col in enumerate(list(list_state[0].columns)):
+
         # create matrix of colums
         col_arr = [list_state[x].iloc[:, n].to_numpy()
                    for x in range(len(list_state))]
         col_arr = np.vstack(col_arr)
 
         d1 = DescrStatsW(col_arr, weights=pesos)
-        average_sim = d1.mean
-        sd_sim = d1.std
 
-        updated_Sim.loc[rowIndex, name_col] = average_sim
-        sd_Sim.loc[rowIndex, name_col] = sd_sim
+        if len(sim_stat.keys()) == 2:  # Mean, Std
+            sim_stat['mean'].loc[rowIndex, name_col] = d1.mean
+            sim_stat['std'].loc[rowIndex, name_col] = d1.std
+        else:
+            perc = d1.quantile([0, 0.25, 0.5, 0.75, 1]).values
+            sim_stat['min'].loc[rowIndex, name_col] = perc[0, :]
+            sim_stat['Q1'].loc[rowIndex, name_col] = perc[1, :]
+            sim_stat['median'].loc[rowIndex, name_col] = perc[2, :]
+            sim_stat['Q3'].loc[rowIndex, name_col] = perc[3, :]
+            sim_stat['max'].loc[rowIndex, name_col] = perc[4, :]
+            sim_stat['mean'].loc[rowIndex, name_col] = d1.mean
+            sim_stat['std'].loc[rowIndex, name_col] = d1.std
+    return sim_stat
 
 
-def init_result(del_t, DA=False):
+def init_result(del_t, DA=False, OL=False):
 
     if DA:
         # Concatenate
@@ -200,19 +230,34 @@ def init_result(del_t, DA=False):
         return Results
 
     else:
+
         # Create results dataframe
         Results = pd.DataFrame(np.nan, index=range(len(del_t)),
                                columns=model_columns)
 
         Results["Date"] = [x.strftime('%d/%m/%Y-%H:%S') for x in del_t]
+        # Reordenar las columnas para que 'Date' sea la primera
+        cols = ['Date'] + [col for col in Results if col != 'Date']
+        Results = Results[cols]
 
-        return Results
+        if cfg.write_stat_full:
+            stat_name_list = ['min', 'max', 'Q1',
+                              'Q3', 'median', 'mean', 'std']
+        else:
+            stat_name_list = ['mean', 'std']
+
+        sim_stat = {key: Results.copy() for key in stat_name_list}
+
+        if OL:
+            return sim_stat["mean"]
+
+        return sim_stat
 
 
 def forcing_table(lat_idx, lon_idx, step=0):
 
     nc_forcing_path = cfg.nc_forcing_path
-    frocing_var_names = cfg.frocing_var_names
+    forcing_var_names = cfg.forcing_var_names
     param_var_names = cfg.param_var_names
     date_ini = cfg.date_ini
     date_end = cfg.date_end
@@ -234,15 +279,15 @@ def forcing_table(lat_idx, lon_idx, step=0):
     else:
 
         prec = ifn.nc_array_forcing(nc_forcing_path, lat_idx, lon_idx,
-                                    frocing_var_names["Precip_var_name"],
+                                    forcing_var_names["Precip_var_name"],
                                     date_ini, date_end)
 
         temp = ifn.nc_array_forcing(nc_forcing_path, lat_idx, lon_idx,
-                                    frocing_var_names["Temp_var_name"],
+                                    forcing_var_names["Temp_var_name"],
                                     date_ini, date_end)
 
         press = ifn.nc_array_forcing(nc_forcing_path, lat_idx, lon_idx,
-                                     frocing_var_names["Press_var_name"],
+                                     forcing_var_names["Press_var_name"],
                                      date_ini, date_end)
         try:
             XLAT = ifn.nc_array_forcing(nc_forcing_path, lat_idx, lon_idx,
@@ -250,6 +295,104 @@ def forcing_table(lat_idx, lon_idx, step=0):
                                         date_ini, date_end)
         except KeyError:
             XLAT = np.repeat(cnt.aprox_lat, len(prec))
+
+        try:
+            uadj = ifn.nc_array_forcing(nc_forcing_path, lat_idx, lon_idx,
+                                        param_var_names["uadj_var_name"],
+                                        date_ini, date_end)
+        except KeyError:
+            uadj = np.repeat(cnt.uadj, len(prec))
+
+        try:
+            mbase = ifn.nc_array_forcing(nc_forcing_path, lat_idx, lon_idx,
+                                         param_var_names["mbase_var_name"],
+                                         date_ini, date_end)
+        except KeyError:
+            mbase = np.repeat(cnt.mbase, len(prec))
+
+        try:
+            mfmax = ifn.nc_array_forcing(nc_forcing_path, lat_idx, lon_idx,
+                                         param_var_names["mfmax_var_name"],
+                                         date_ini, date_end)
+        except KeyError:
+            mfmax = np.repeat(cnt.mfmax, len(prec))
+
+        try:
+            mfmin = ifn.nc_array_forcing(nc_forcing_path, lat_idx, lon_idx,
+                                         param_var_names["mfmin_var_name"],
+                                         date_ini, date_end)
+        except KeyError:
+            mfmin = np.repeat(cnt.mfmin, len(prec))
+
+        try:
+            tipm = ifn.nc_array_forcing(nc_forcing_path, lat_idx, lon_idx,
+                                        param_var_names["tipm_var_name"],
+                                        date_ini, date_end)
+        except KeyError:
+            tipm = np.repeat(cnt.tipm, len(prec))
+
+        try:
+            nmf = ifn.nc_array_forcing(nc_forcing_path, lat_idx, lon_idx,
+                                       param_var_names["nmf_var_name"],
+                                       date_ini, date_end)
+        except KeyError:
+            nmf = np.repeat(cnt.nmf, len(prec))
+
+        try:
+            plwhc = ifn.nc_array_forcing(nc_forcing_path, lat_idx, lon_idx,
+                                         param_var_names["plwhc_var_name"],
+                                         date_ini, date_end)
+        except KeyError:
+            plwhc = np.repeat(cnt.plwhc, len(prec))
+
+        try:
+            pxtemp = ifn.nc_array_forcing(nc_forcing_path, lat_idx, lon_idx,
+                                          param_var_names["pxtemp_var_name"],
+                                          date_ini, date_end)
+        except KeyError:
+            pxtemp = np.repeat(cnt.pxtemp, len(prec))
+
+        try:
+            pxtemp1 = ifn.nc_array_forcing(nc_forcing_path, lat_idx, lon_idx,
+                                           param_var_names["pxtemp1_var_name"],
+                                           date_ini, date_end)
+        except KeyError:
+            pxtemp1 = np.repeat(cnt.pxtemp1, len(prec))
+
+        try:
+            pxtemp2 = ifn.nc_array_forcing(nc_forcing_path, lat_idx, lon_idx,
+                                           param_var_names["pxtemp2_var_name"],
+                                           date_ini, date_end)
+        except KeyError:
+            pxtemp2 = np.repeat(cnt.pxtemp2, len(prec))
+
+        try:
+            rcld = ifn.nc_array_forcing(nc_forcing_path, lat_idx, lon_idx,
+                                        param_var_names["rcld_var_name"],
+                                        date_ini, date_end)
+        except KeyError:
+            rcld = np.repeat(cnt.rcld, len(prec))
+
+        try:
+            rmlt = ifn.nc_array_forcing(nc_forcing_path, lat_idx, lon_idx,
+                                        param_var_names["rmlt_var_name"],
+                                        date_ini, date_end)
+        except KeyError:
+            rmlt = np.repeat(cnt.rmlt, len(prec))
+
+        try:
+            rhof = ifn.nc_array_forcing(nc_forcing_path, lat_idx, lon_idx,
+                                        param_var_names["rhof_var_name"],
+                                        date_ini, date_end)
+        except KeyError:
+            rhof = np.repeat(cnt.rhof, len(prec))
+
+        try:
+            trho = ifn.nc_array_forcing(nc_forcing_path, lat_idx, lon_idx,
+                                        param_var_names["trho_var_name"],
+                                        date_ini, date_end)
+        except KeyError:
+            trho = np.repeat(cnt.trho, len(prec))
 
         date_ini = dt.datetime.strptime(date_ini, "%Y-%m-%d %H:%M")
         date_end = dt.datetime.strptime(date_end, "%Y-%m-%d %H:%M")
@@ -262,7 +405,21 @@ def forcing_table(lat_idx, lon_idx, step=0):
                                    "Prec": prec,
                                    "Ta": temp,
                                    "press": press,
-                                   "XLAT": XLAT})
+                                   "XLAT": XLAT,
+                                   "uadj": uadj,
+                                   "mbase": mbase,
+                                   "mfmax": mfmax,
+                                   "mfmin": mfmin,
+                                   "tipm": tipm,
+                                   "nmf": nmf,
+                                   "plwhc": plwhc,
+                                   "pxtemp": pxtemp,
+                                   "pxtemp1": pxtemp1,
+                                   "pxtemp2": pxtemp2,
+                                   "rcld": rcld,
+                                   "rmlt": rmlt,
+                                   "rhof": rhof,
+                                   "trho": trho})
 
         forcing_df["year"] = forcing_df["year"].dt.year
         forcing_df["month"] = forcing_df["month"].dt.month

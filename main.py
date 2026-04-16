@@ -28,6 +28,7 @@ else:
 from modules.cell_assim import cell_assimilation
 from mpi4py import MPI
 import logging
+import os
 
 
 def MuSA():
@@ -36,6 +37,10 @@ def MuSA():
         pass
     else:
         model.model_compile()
+
+    if cfg.implementation in ["distributed", "Spatial_propagation",
+                              "open_loop"]:
+        grid = ifn.expand_grid()
 
     """
     This is the main function. Here the parallelization scheme and the
@@ -64,9 +69,7 @@ def MuSA():
 
         cell_assimilation(lat_idx, lon_idx)
 
-    elif (cfg.implementation == "distributed"):
-
-        grid = ifn.expand_grid()
+    elif cfg.implementation == "distributed":
 
         if cfg.parallelization == "sequential":
 
@@ -121,12 +124,10 @@ def MuSA():
             raise Exception("Choose an available paralelization scheme")
 
     elif cfg.implementation == 'Spatial_propagation':
-        if cfg.da_algorithm not in ["ES", "IES"]:
-            raise Exception("Spatial_propagation needs ES/IES methods")
+
+        ids = np.arange(0, grid.shape[0])
 
         if cfg.parallelization == "HPC.array":
-
-            grid = ifn.expand_grid()
 
             # Restart run
             if cfg.restart_run:
@@ -143,7 +144,6 @@ def MuSA():
             nprocess = int(sys.argv[2])
             HPC_task_id = int(sys.argv[3])-1
 
-            ids = np.arange(0, grid.shape[0])
             ids = ids % HPC_task_number == HPC_task_id
 
             print("Running MuSA: Distributed (HPC.array) from job: " +
@@ -165,9 +165,9 @@ def MuSA():
 
                 # create prior Ensembles
                 inputs = [list(grid[ids, 0]), list(grid[ids, 1]),
-                          [ini_DA_window] * sum(ids),
-                          [step] * sum(ids),
-                          [gsc_count] * sum(ids)]
+                          [ini_DA_window] * len(ids),
+                          [step] * len(ids),
+                          [gsc_count] * len(ids)]
 
                 ifn.safe_pool(spM.create_ensemble_cell, inputs, nprocess)
 
@@ -182,7 +182,7 @@ def MuSA():
                     logging.info(f'step: {step} - j: {j}')
 
                     inputs = [list(grid[ids, 0]), list(grid[ids, 1]),
-                              [step] * sum(ids), [j]*sum(ids)]
+                              [step] * len(ids), [j]*len(ids)]
 
                     ifn.safe_pool(spM.spatial_assim, inputs, nprocess)
 
@@ -197,8 +197,6 @@ def MuSA():
                 ifn.safe_pool(spM.collect_results, inputs, nprocess)
 
         elif cfg.parallelization == "multiprocessing":
-
-            grid = ifn.expand_grid()
 
             # Restart run
             if cfg.restart_run:
@@ -224,6 +222,8 @@ def MuSA():
             ini_DA_window = spM.domain_steps()
 
             # DA loop
+            iteration_sims = list()
+            count = 0
             for gsc_count, step in enumerate(range(len(ini_DA_window))):
 
                 if cfg.restart_run and step < prev_step:
@@ -231,14 +231,20 @@ def MuSA():
 
                 # create prior Ensembles
                 inputs = [list(grid[ids, 0]), list(grid[ids, 1]),
-                          [ini_DA_window] * sum(ids),
-                          [step] * sum(ids),
-                          [gsc_count] * sum(ids)]
+                          [ini_DA_window] * len(ids),
+                          [step] * len(ids),
+                          [gsc_count] * len(ids),
+                          [iteration_sims[-1] if iteration_sims else None] *
+                          len(ids)]
 
-                ifn.safe_pool(spM.create_ensemble_cell, inputs, nprocess)
+                iteration_sims.append(ifn.safe_pool(spM.create_ensemble_cell,
+                                                    inputs,
+                                                    nprocess,
+                                                    in_mem=cfg.spatial_in_mem))
 
                 # Wait untill all ensembles are created
-                spM.wait_for_ensembles(step, 0)
+                if not cfg.spatial_in_mem:
+                    spM.wait_for_ensembles(step, 0)
 
                 for j in range(cfg.max_iterations):  # Run spatial assim
 
@@ -249,20 +255,34 @@ def MuSA():
 
                     inputs = [list(grid[:, 0]), list(grid[:, 1]),
                               [step] * grid.shape[0],
-                              [j] * grid.shape[0]]
+                              [j] * grid.shape[0],
+                              [iteration_sims[-1] if iteration_sims else None]
+                              * len(ids)]
 
-                    ifn.safe_pool(spM.spatial_assim, inputs, nprocess)
+                    iteration_sims.append(ifn.safe_pool(spM.spatial_assim,
+                                                        inputs,
+                                                        nprocess,
+                                                        in_mem=cfg.spatial_in_mem))
 
                     # Wait untill all ensembles are updated and remove prior
-                    spM.wait_for_ensembles(step, 0, j)
+                    if cfg.spatial_in_mem:
+                        if j != cfg.max_iterations:
+                            iteration_sims[count] = None
+                    else:
+                        spM.wait_for_ensembles(step, 0, j)
 
-            # collect results
-            inputs = [grid[:, 0], grid[:, 1]]
+                    count = count + 1
+
+                count = count + 1  # Not a bug, is to skip the last iter
+
+            iteration_sims = [x for x in iteration_sims if x is not None]
+
+            inputs = [grid[:, 0], grid[:, 1], [iteration_sims] *
+                      len(ids)]
+
             ifn.safe_pool(spM.collect_results, inputs, nprocess)
 
     elif cfg.implementation == "open_loop":
-
-        grid = ifn.expand_grid()
 
         print("Running FSM simulation: Distributed (multiprocessing)")
 
@@ -275,6 +295,7 @@ def MuSA():
               str(mp.cpu_count()) + " processors")
 
         inputs = [grid[:, 0], grid[:, 1]]
+
         ifn.safe_pool(ifn.open_loop_simulation, inputs, nprocess)
 
     else:

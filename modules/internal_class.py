@@ -51,7 +51,7 @@ class SnowEnsemble():
         if cfg.da_algorithm in ['EnKF', 'IEnKF', 'ES',
                                 'IES', 'IES-MCMC_AI',
                                 'IES-MCMC', 'PIES',
-                                'AdaPBS', 'AdaMuPBS']:
+                                'ProPBS', 'AdaPBS']:
             self.noise_iter = [0 for i in range(self.members)]
             self.out_members_iter = [0 for i in range(self.members)]
 
@@ -302,8 +302,8 @@ class SnowEnsemble():
                 self.noise_iter[mbr] = noise_k_tmp.copy()
 
                 if (iteration == cfg.max_iterations - 1 or
-                        cfg.da_algorithm in ['EnKF', 'ES', 'AdaPBS',
-                                             'AdaMuPBS']):
+                        cfg.da_algorithm in ['EnKF', 'ES', 'ProPBS',
+                                             'AdaPBS']):
 
                     self.out_members_iter[mbr] = dump_tmp.copy()
 
@@ -404,3 +404,10 @@ class SnowEnsemble():
 
         self.state_membres = [fns.reduce_size_state(x, self.observations)
                               for x in self.state_membres]
+
+    def reduce_precision(self):
+        self.state_membres = [x.round(2).astype(np.float16)
+                              for x in self.state_membres]
+
+    def rm_forz(self):
+        self.forcing = None
