@@ -187,6 +187,22 @@ Sx_angle = 315           # Sx main wind direction angle
 nc_dem_varname = "DEM"     # Name of the elevation variable in the DEM
 
 # -----------------------------------
+# Spatial propagation - user-defined correlation mode
+# -----------------------------------
+
+# The user can now input correlation matrix and localization mask.
+
+# If the files are set to None, the settings in the section above are used 
+# to propagate information based on a topographical dictionary.
+
+# If the files set as .npy files matrixes of size (n_lats*n_lons, n_lats*n_lons) 
+# than MuSA will use corr matrix to define the correlation between grid_points
+# and prop_mask (a binary) as localization, allowing information to flow between points with non-zero values in prop_mask.
+
+corr = None
+prop_mask = None
+
+# -----------------------------------
 # Observations
 # -----------------------------------
 

@@ -326,6 +326,11 @@ def add_jitter(K, jitter=1e-6):
 
 def GSC(mu, sigma, rho, orderows):
 
+    if cfg.corr is not None:
+        order = 'F'
+    else:
+        order = 'C'
+
     N = cfg.ensemble_members
     mask = cfg.nc_maks_path
 
@@ -423,7 +428,7 @@ def GSC(mu, sigma, rho, orderows):
     if mask:  # recover original structure
 
         mask = nc.Dataset(mask)
-        mask_value = mask.variables['mask'][:].flatten()
+        mask_value = mask.variables['mask'][:].flatten(order=order)
         mask.close()
 
         real_x = np.zeros([n_lats * n_lons, N])
@@ -434,7 +439,7 @@ def GSC(mu, sigma, rho, orderows):
 
     # tidy matrix
     x = x[:, :, np.newaxis]
-    x = x.reshape((n_lats, n_lons, N), order='C')
+    x = x.reshape((n_lats, n_lons, N), order=order)
     # x = x.reshape((n_lats, n_lons, N), order='F')
 
     return x
@@ -442,131 +447,153 @@ def GSC(mu, sigma, rho, orderows):
 
 def get_rho(prior_id):
 
-    c = cfg.c
+    # if user provided cfg.corr, read that directly.
+    if cfg.corr is not None:
+        rho = [np.load(cfg.corr)]
 
-    if c.count(c[0]) == len(c):  # save memory if all c are the same
-        c = [c[0]]
+        # apply the mask if it exists.
+        if cfg.nc_maks_path:
+            if cfg.corr:
+                order = 'F'
+            else:
+                order = 'C'
 
-    coords, orderows = calculate_coords()
+            mask = nc.Dataset(cfg.nc_maks_path)
+            mask_value = mask.variables['mask'][:].flatten(order=order)
+            mask.close()
 
-    if cfg.distance_mat_calc == 'Sparse':
+            rho[0] = rho[0][mask_value == 1, :][:, mask_value == 1]
 
-        # create netcdf to save distances line by line
-        spatial_propagation_storage_path = cfg.spatial_propagation_storage_path
+            orderows = np.arange(rho[0].shape[0])
 
-        name_dist = "dist_" + str(prior_id) + ".nc"
-        name_dist = os.path.join(spatial_propagation_storage_path, name_dist)
-
-        f = nc.Dataset(name_dist, 'w', format='NETCDF4')
-
-        f.createDimension('Y', coords.shape[0])
-        f.createDimension('X', coords.shape[0])
-
-        # float 64 is necesary, otherwise distance matrix is not PD
-        distnc = f.createVariable('Dist', np.float64, ('Y', 'X'),
-                                  zlib=True, complevel=4, fletcher32=True,
-                                  chunksizes=(coords.shape[0], 1))
-
-        f.close()
-
-        # allocate lil_mat
-
-        rho_spar = lil_matrix((coords.shape[0], coords.shape[0]))
-        rho_spar = [rho_spar.copy() for _ in range(len(c))]
-
-        ids = np.argsort(orderows)  # ids to recover distance mat geometry
-        dist_nc = nc.Dataset(name_dist, 'a')
-
-        # loop over rows to avoid calculate all distances
-
-        for n in range(coords.shape[0]):
-            print(n)
-
-            tmp_row = coords[orderows[n], :][np.newaxis, :]
-
-            tmp_dis = distance.cdist(coords[orderows, :],
-                                     tmp_row,
-                                     cfg.dist_algo)
-
-            # compute GC row by row
-            rho_tmp = [GC(tmp_dis, c[nn]) for nn in range(len(c))]
-
-            # Insert row rho in the preallocated lil_mat
-            for nn in range(len(c)):
-                rho_spar[nn][n, :] = rho_tmp[nn]
-
-            # Saves row distances in the netcdf
-            tmp_dis[tmp_dis > max(c)*2] = np.nan
-            dist_nc['Dist'][:, ids[n]] = tmp_dis[orderows]
-            # d = d[:, orderows][orderows]
-        dist_nc.close()
-
-        # transform frmo lil_mat to csc to perform the chol latter
-        rho = [csc_array(nn) for nn in rho_spar]
-    elif cfg.distance_mat_calc == 'Regular':
-
-        d = distance.cdist(coords[orderows, :],
-                           coords[orderows, :],
-                           cfg.dist_algo)
-
-        d[d > max(c)*2] = np.nan
-        save_distance(d, orderows, prior_id)
-
-        # Transform to sparse matrix
-        rho = [csc_array(GC(d, c_par)) for c_par in c]
-
-    elif cfg.distance_mat_calc == 'KDtree':
-        # raise Exception('KDtree implementation not finished yet')
-
-        A = cKDTree(coords[orderows, :])
-
-        d = A.sparse_distance_matrix(A,  max(c)*2, p=2.0,
-                                     output_type='coo_matrix')
-        # Scompute correlations01
-
-        data_dense = [GC(d.data, c_par) for c_par in c]
-
-        # desnse values
-        rho = [d.copy() for _ in range(len(c))]
-
-        for i in range(len(c)):
-            rho[i].data = data_dense[i]
-            rho[i] = csc_array(rho[i])
-
-        d = csc_array(d)
-        d = d[:, orderows][orderows]  # ORDER complete matrix
-
-        # SAVEMATRAIXHERE
-        # create netcdf to save distances line by line
-        spatial_propagation_storage_path = cfg.spatial_propagation_storage_path
-
-        name_dist = "dist_" + str(prior_id) + ".nc"
-        name_dist = os.path.join(spatial_propagation_storage_path, name_dist)
-
-        f = nc.Dataset(name_dist, 'w', format='NETCDF4')
-
-        f.createDimension('Y', coords.shape[0])
-        f.createDimension('X', coords.shape[0])
-
-        # float 64 is necesary, otherwise distance matrix is not PD
-        distnc = f.createVariable('Dist', np.float64, ('Y', 'X'),
-                                  zlib=True, complevel=4, fletcher32=True,
-                                  chunksizes=(coords.shape[0], 1))
-
-        for n in range(coords.shape[0]):
-            # Save line by line, to not todense() the whole d matrix
-            print(n)
-
-            tmp_dis = d[:, [n]].todense()
-            # NOTE: this masks the current cell, but the current cell
-            # is added anyway when the neig is created
-            tmp_dis[tmp_dis == 0.] = np.nan
-            tmp_dis[n] = 0.  # put 0 in diagonal
-
-            distnc[:, n] = tmp_dis
-        f.close()
+    # if cfg.corr is None: calculate rho with GaspariCohn function
     else:
-        raise Exception('No valid distance_mat_calc')
+
+        c = cfg.c
+
+        if c.count(c[0]) == len(c):  # save memory if all c are the same
+            c = [c[0]]
+
+        coords, orderows = calculate_coords()
+
+        if cfg.distance_mat_calc == 'Sparse':
+
+            # create netcdf to save distances line by line
+            spatial_propagation_storage_path = cfg.spatial_propagation_storage_path
+
+            name_dist = "dist_" + str(prior_id) + ".nc"
+            name_dist = os.path.join(spatial_propagation_storage_path, name_dist)
+
+            f = nc.Dataset(name_dist, 'w', format='NETCDF4')
+
+            f.createDimension('Y', coords.shape[0])
+            f.createDimension('X', coords.shape[0])
+
+            # float 64 is necesary, otherwise distance matrix is not PD
+            distnc = f.createVariable('Dist', np.float64, ('Y', 'X'),
+                                    zlib=True, complevel=4, fletcher32=True,
+                                    chunksizes=(coords.shape[0], 1))
+
+            f.close()
+
+            # allocate lil_mat
+
+            rho_spar = lil_matrix((coords.shape[0], coords.shape[0]))
+            rho_spar = [rho_spar.copy() for _ in range(len(c))]
+
+            ids = np.argsort(orderows)  # ids to recover distance mat geometry
+            dist_nc = nc.Dataset(name_dist, 'a')
+
+            # loop over rows to avoid calculate all distances
+
+            for n in range(coords.shape[0]):
+                print(n)
+
+                tmp_row = coords[orderows[n], :][np.newaxis, :]
+
+                tmp_dis = distance.cdist(coords[orderows, :],
+                                        tmp_row,
+                                        cfg.dist_algo)
+
+                # compute GC row by row
+                rho_tmp = [GC(tmp_dis, c[nn]) for nn in range(len(c))]
+
+                # Insert row rho in the preallocated lil_mat
+                for nn in range(len(c)):
+                    rho_spar[nn][n, :] = rho_tmp[nn]
+
+                # Saves row distances in the netcdf
+                tmp_dis[tmp_dis > max(c)*2] = np.nan
+                dist_nc['Dist'][:, ids[n]] = tmp_dis[orderows]
+                # d = d[:, orderows][orderows]
+            dist_nc.close()
+
+            # transform frmo lil_mat to csc to perform the chol latter
+            rho = [csc_array(nn) for nn in rho_spar]
+        elif cfg.distance_mat_calc == 'Regular':
+
+            d = distance.cdist(coords[orderows, :],
+                            coords[orderows, :],
+                            cfg.dist_algo)
+
+            d[d > max(c)*2] = np.nan
+            save_distance(d, orderows, prior_id)
+
+            # Transform to sparse matrix
+            rho = [csc_array(GC(d, c_par)) for c_par in c]
+
+        elif cfg.distance_mat_calc == 'KDtree':
+            # raise Exception('KDtree implementation not finished yet')
+
+            A = cKDTree(coords[orderows, :])
+
+            d = A.sparse_distance_matrix(A,  max(c)*2, p=2.0,
+                                        output_type='coo_matrix')
+            # Scompute correlations01
+
+            data_dense = [GC(d.data, c_par) for c_par in c]
+
+            # desnse values
+            rho = [d.copy() for _ in range(len(c))]
+
+            for i in range(len(c)):
+                rho[i].data = data_dense[i]
+                rho[i] = csc_array(rho[i])
+
+            d = csc_array(d)
+            d = d[:, orderows][orderows]  # ORDER complete matrix
+
+            # SAVEMATRAIXHERE
+            # create netcdf to save distances line by line
+            spatial_propagation_storage_path = cfg.spatial_propagation_storage_path
+
+            name_dist = "dist_" + str(prior_id) + ".nc"
+            name_dist = os.path.join(spatial_propagation_storage_path, name_dist)
+
+            f = nc.Dataset(name_dist, 'w', format='NETCDF4')
+
+            f.createDimension('Y', coords.shape[0])
+            f.createDimension('X', coords.shape[0])
+
+            # float 64 is necesary, otherwise distance matrix is not PD
+            distnc = f.createVariable('Dist', np.float64, ('Y', 'X'),
+                                    zlib=True, complevel=4, fletcher32=True,
+                                    chunksizes=(coords.shape[0], 1))
+
+            for n in range(coords.shape[0]):
+                # Save line by line, to not todense() the whole d matrix
+                print(n)
+
+                tmp_dis = d[:, [n]].todense()
+                # NOTE: this masks the current cell, but the current cell
+                # is added anyway when the neig is created
+                tmp_dis[tmp_dis == 0.] = np.nan
+                tmp_dis[n] = 0.  # put 0 in diagonal
+
+                distnc[:, n] = tmp_dis
+            f.close()
+        else:
+            raise Exception('No valid distance_mat_calc')
 
     return rho, orderows
 
@@ -851,14 +878,21 @@ def read_distances(lat_idx, lon_idx):
     c = cfg.c
     c = max(c)
 
-    name_dist = "dist_0.nc"
-    name_dist = os.path.join(spatial_propagation_storage_path, name_dist)
+    # if the user provided a localization_mask, read the distances from there.
+    if cfg.prop_mask:
+        name_dist = cfg.prop_mask
+        distances = np.load(cfg.prop_mask)[:,idrow]
 
-    idrow = get_idrow_from_cor(lat_idx, lon_idx)
+    else:
 
-    f = nc.Dataset(name_dist, format='NETCDF4')
-    distances = f.variables["Dist"][:, idrow]
-    f.close()
+        name_dist = "dist_0.nc"
+        name_dist = os.path.join(spatial_propagation_storage_path, name_dist)
+
+        idrow = get_idrow_from_cor(lat_idx, lon_idx)
+
+        f = nc.Dataset(name_dist, format='NETCDF4')
+        distances = f.variables["Dist"][:, idrow]
+        f.close()
 
     # distances[distances > c*2] = np.nan # far distances already masked
 
@@ -903,7 +937,13 @@ def create_neigb(lat_idx, lon_idx, step, j, sim_dic=None):
 
         grid = grid[mask == 1, :]
         grid = np.squeeze(grid)
+        
+        # if there is a mask, there is the need to apply it in the localisation matrix when the user provides such matrix. Not needed when MuSA does it.
+        if cfg.prop_mask:
+            distances = distances[mask == 1]
+            distances = np.squeeze(distances)
 
+    id_neigb = np.asarray(np.where(~np.isnan(distances)))
     neigb = np.squeeze(grid[id_neigb])
 
     # numpy....
@@ -1099,30 +1139,47 @@ def add_local_coords(Ensemble, curren_lat, current_lon, neig_lat, neig_long):
 
 def generate_local_rho(curren_lat, current_lon, neig_lat, neig_long):
 
-    c = cfg.c
-    spatial_propagation_storage_path = cfg.spatial_propagation_storage_path
+    # Calculate rho with GaspariCohn function if user did not provide cfg.corr.
+    if cfg.corr is None:
+        c = cfg.c
+        spatial_propagation_storage_path = cfg.spatial_propagation_storage_path
 
-    name_dist = "dist_0.nc"
-    name_dist = os.path.join(spatial_propagation_storage_path, name_dist)
+        name_dist = "dist_0.nc"
+        name_dist = os.path.join(spatial_propagation_storage_path, name_dist)
 
-    current_id = get_idrow_from_cor(curren_lat, current_lon)
-    neig_ids = get_idrow_from_cor(neig_lat, neig_long)
+        current_id = get_idrow_from_cor(curren_lat, current_lon)
+        neig_ids = get_idrow_from_cor(neig_lat, neig_long)
 
-    f = nc.Dataset(name_dist)
-    if isinstance(neig_ids, int):
-        d_curent_neig = f.variables["Dist"][neig_ids,
-                                            current_id]
-        d_neig_neig = f.variables["Dist"][neig_ids,
-                                          neig_ids]
-    else:
-        d_curent_neig = f.variables["Dist"][neig_ids.flatten().astype(int),
-                                            current_id]
-        d_neig_neig = f.variables["Dist"][neig_ids.flatten().astype(int),
-                                          neig_ids.flatten().astype(int)]
-    f.close()
+        f = nc.Dataset(name_dist)
+        if isinstance(neig_ids, int):
+            d_curent_neig = f.variables["Dist"][neig_ids,
+                                                current_id]
+            d_neig_neig = f.variables["Dist"][neig_ids,
+                                            neig_ids]
+        else:
+            d_curent_neig = f.variables["Dist"][neig_ids.flatten().astype(int),
+                                                current_id]
+            d_neig_neig = f.variables["Dist"][neig_ids.flatten().astype(int),
+                                            neig_ids.flatten().astype(int)]
+        f.close()
 
-    rho_par_predicted_obs = [GC(d_curent_neig, c_par) for c_par in c]
-    rho_predicted_obs = GC(d_neig_neig, max(c))
+        rho_par_predicted_obs = [GC(d_curent_neig, c_par) for c_par in c]
+        rho_predicted_obs = GC(d_neig_neig, max(c))
+
+    # read rho directly if user provided cfg.corr
+
+    else: # if covariance are provided:
+        corr_mat = np.load(cfg.corr)
+
+        current_id = get_idrow_from_cor(curren_lat, current_lon)
+        neig_ids = get_idrow_from_cor(neig_lat, neig_long)
+
+        if isinstance(neig_ids, int):
+            rho_par_predicted_obs = corr_mat[neig_ids, current_id]
+            rho_predicted_obs = corr_mat[neig_ids, neig_ids]
+        else:
+            rho_par_predicted_obs = corr_mat[neig_ids.astype(int), current_id]
+            rho_predicted_obs = corr_mat[neig_ids.astype(int), neig_ids]
 
     return rho_par_predicted_obs, rho_predicted_obs
 
